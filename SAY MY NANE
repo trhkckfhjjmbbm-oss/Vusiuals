@@ -1,0 +1,788 @@
+-- VisualsMenu (LocalScript)
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local Debris = game:GetService("Debris")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+while not camera do
+	workspace:GetPropertyChangedSignal("CurrentCamera"):Wait()
+	camera = workspace.CurrentCamera
+end
+
+local TOGGLE_KEY = Enum.KeyCode.RightShift
+
+local function new(class, props, parent)
+	local obj = Instance.new(class)
+	for k, v in pairs(props) do obj[k] = v end
+	obj.Parent = parent
+	return obj
+end
+
+local function round(parent, r) return new("UICorner", { CornerRadius = UDim.new(0, r) }, parent) end
+
+local function stroke(parent, color, thickness, transparency)
+	return new("UIStroke", { Color = color, Thickness = thickness or 1, Transparency = transparency or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, parent)
+end
+
+local function ns(...)
+	local pts = {}
+	for _, p in ipairs({ ... }) do table.insert(pts, NumberSequenceKeypoint.new(p[1], p[2])) end
+	return NumberSequence.new(pts)
+end
+local function noop() end
+
+local BLUE = Color3.fromRGB(110, 150, 255)
+
+local S = {
+	trail = { on = false, style = "Glow", color = BLUE, rainbow = false, life = 1.2, width = 1.4, bright = 0.8 },
+	aura = { on = false, style = "Sparks", color = BLUE, rainbow = false, rate = 40, speed = 3, spread = 180, size = 0.8, drift = 2 },
+	orbit = { on = false, count = 4, radius = 4, speed = 2, height = 0, size = 0.5, tail = true, color = BLUE, rainbow = false },
+	glow = { on = false, color = BLUE, rainbow = false, fill = 0.7, light = true, range = 16, power = 2 },
+	burst = { on = false, color = BLUE, rainbow = false, size = 16 },
+	world = { on = false, time = Lighting.ClockTime, bloom = 0.4, sat = 0, contrast = 0, fov = camera.FieldOfView },
+}
+
+local PALETTE = { BLUE, Color3.fromRGB(255, 105, 180), Color3.fromRGB(170, 110, 255), Color3.fromRGB(80, 230, 255), Color3.fromRGB(100, 255, 150), Color3.fromRGB(255, 80, 80), Color3.fromRGB(255, 255, 255) }
+local hue = 0
+
+local function colorOf(cfg)
+	if cfg.rainbow then return Color3.fromHSV(hue, 0.65, 1) end
+	return cfg.color
+end
+
+local TRAIL_STYLES = {
+	Glow = { trans = ns({ 0, 0.3 }, { 1, 1 }), width = ns({ 0, 1 }, { 1, 0 }) },
+	Neon = { trans = ns({ 0, 0 }, { 0.8, 0.3 }, { 1, 1 }), width = ns({ 0, 1 }, { 1, 0.7 }), light = 1 },
+	Smoke = { trans = ns({ 0, 0.5 }, { 1, 1 }), width = ns({ 0, 0.6 }, { 1, 2 }), light = 0 },
+}
+local TRAIL_ORDER = { "Glow", "Neon", "Smoke" }
+local AURA_TEX = { Sparks = "rbxasset://textures/particles/sparkles_main.dds", Smoke = "rbxasset://textures/particles/smoke_main.dds", Fire = "rbxasset://textures/particles/fire_main.dds" }
+local AURA_ORDER = { "Sparks", "Smoke", "Fire" }
+
+local folder = new("Folder", { Name = "LocalVisuals" }, workspace)
+local hrp, hum
+local trail, tA0, tA1, emitter, highlight, light
+local orbs = {}
+local orbitPhase = 0
+
+local bloom = new("BloomEffect", { Name = "VisBloom", Enabled = false, Size = 28, Threshold = 0.85 }, Lighting)
+local cc = new("ColorCorrectionEffect", { Name = "VisColor", Enabled = false }, Lighting)
+
+local function applyTrail()
+	if not trail then return end
+	local c = S.trail
+	local st = TRAIL_STYLES[c.style]
+	tA0.Position = Vector3.new(0, c.width / 2, 0)
+	tA1.Position = Vector3.new(0, -c.width / 2, 0)
+	trail.Lifetime = c.life
+	trail.Transparency = st.trans
+	trail.WidthScale = st.width
+	trail.LightEmission = st.light or c.bright
+	trail.Color = ColorSequence.new(colorOf(c))
+	trail.Enabled = c.on
+end
+
+local function applyAura()
+	if not emitter then return end
+	local c = S.aura
+	emitter.Texture = AURA_TEX[c.style]
+	emitter.Rate = c.rate
+	emitter.Speed = NumberRange.new(c.speed * 0.5, c.speed)
+	emitter.SpreadAngle = Vector2.new(c.spread, c.spread)
+	emitter.Size = ns({ 0, c.size }, { 1, 0 })
+	emitter.Acceleration = Vector3.new(0, c.drift, 0)
+	emitter.LightEmission = (c.style == "Smoke") and 0.2 or 1
+	emitter.Color = ColorSequence.new(colorOf(c))
+	emitter.Enabled = c.on
+end
+
+local function rebuildOrbs()
+	for _, p in ipairs(orbs) do p:Destroy() end
+	table.clear(orbs)
+	local c = S.orbit
+	if not c.on or not hrp then return end
+	local col = colorOf(c)
+	for _ = 1, c.count do
+		local p = new("Part", { Shape = Enum.PartType.Ball, Material = Enum.Material.Neon, Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false, CastShadow = false, Size = Vector3.one * c.size, Color = col }, folder)
+		local a0 = new("Attachment", { Position = Vector3.new(0, c.size / 2, 0) }, p)
+		local a1 = new("Attachment", { Position = Vector3.new(0, -c.size / 2, 0) }, p)
+		new("Trail", { Attachment0 = a0, Attachment1 = a1, Lifetime = 0.7, LightEmission = 1, FaceCamera = true, Enabled = c.tail, Color = ColorSequence.new(col), Transparency = ns({ 0, 0.1 }, { 1, 1 }), WidthScale = ns({ 0, 1 }, { 1, 0 }) }, p)
+		table.insert(orbs, p)
+	end
+end
+
+local function applyGlow()
+	if not highlight then return end
+	local c = S.glow
+	local col = colorOf(c)
+	highlight.Enabled = c.on
+	highlight.FillColor = col
+	highlight.OutlineColor = col
+	highlight.FillTransparency = c.fill
+	light.Enabled = c.on and c.light
+	light.Color = col
+	light.Range = c.range
+	light.Brightness = c.power
+end
+
+local function applyColors()
+	if S.trail.rainbow and trail then trail.Color = ColorSequence.new(colorOf(S.trail)) end
+	if S.aura.rainbow and emitter then emitter.Color = ColorSequence.new(colorOf(S.aura)) end
+	if S.glow.rainbow then applyGlow() end
+	if S.orbit.rainbow then
+		local col = colorOf(S.orbit)
+		for _, p in ipairs(orbs) do
+			p.Color = col
+			local tr = p:FindFirstChildOfClass("Trail")
+			if tr then tr.Color = ColorSequence.new(col) end
+		end
+	end
+end
+
+local worldApplied = false
+local origClock, origFov
+local function applyWorld()
+	local w = S.world
+	local cam = workspace.CurrentCamera
+	if w.on then
+		if not worldApplied then origClock, origFov = Lighting.ClockTime, cam.FieldOfView; worldApplied = true end
+		bloom.Enabled = true
+		cc.Enabled = true
+		bloom.Intensity = w.bloom
+		cc.Saturation = w.sat
+		cc.Contrast = w.contrast
+		Lighting.ClockTime = w.time
+		cam.FieldOfView = w.fov
+	elseif worldApplied then
+		bloom.Enabled = false
+		cc.Enabled = false
+		Lighting.ClockTime = origClock
+		cam.FieldOfView = origFov
+		worldApplied = false
+	end
+end
+
+local function burst()
+	local b = S.burst
+	if not b.on or not hrp or not hum then return end
+	local feetOffset = (hum.RigType == Enum.HumanoidRigType.R15) and (hum.HipHeight + hrp.Size.Y / 2) or 3
+	local ring = new("Part", { Shape = Enum.PartType.Cylinder, Material = Enum.Material.Neon, Color = colorOf(b), Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false, CastShadow = false, Size = Vector3.new(0.2, 2, 2), Transparency = 0.15, CFrame = CFrame.new(hrp.Position - Vector3.new(0, feetOffset, 0)) * CFrame.Angles(0, 0, math.rad(90)) }, folder)
+	TweenService:Create(ring, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = Vector3.new(0.2, b.size, b.size), Transparency = 1 }):Play()
+	Debris:AddItem(ring, 0.8)
+end
+
+local function onCharacter(c)
+	hrp = c:WaitForChild("HumanoidRootPart")
+	hum = c:WaitForChild("Humanoid")
+	tA0 = new("Attachment", { Name = "VisA0" }, hrp)
+	tA1 = new("Attachment", { Name = "VisA1" }, hrp)
+	trail = new("Trail", { Attachment0 = tA0, Attachment1 = tA1, FaceCamera = true, Enabled = false }, hrp)
+	emitter = new("ParticleEmitter", { Enabled = false, Lifetime = NumberRange.new(0.8, 1.6), Rotation = NumberRange.new(0, 360), RotSpeed = NumberRange.new(-60, 60), Transparency = ns({ 0, 0.2 }, { 1, 1 }) }, hrp)
+	highlight = new("Highlight", { Adornee = c, Enabled = false, DepthMode = Enum.HighlightDepthMode.Occluded, OutlineTransparency = 0 }, c)
+	light = new("PointLight", { Enabled = false, Shadows = false }, hrp)
+	hum.Jumping:Connect(function(active) if active then burst() end end)
+	applyTrail()
+	applyAura()
+	applyGlow()
+	rebuildOrbs()
+end
+
+local C = { bg = Color3.fromRGB(12, 12, 18), side = Color3.fromRGB(17, 17, 25), item = Color3.fromRGB(25, 25, 36), text = Color3.fromRGB(228, 230, 242), dim = Color3.fromRGB(125, 130, 152), accent = BLUE, line = Color3.fromRGB(45, 48, 68) }
+local orderCounter = 0
+local function nextOrder() orderCounter += 1; return orderCounter end
+
+local gui = new("ScreenGui", { Name = "VisualsMenu", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 20 }, player:WaitForChild("PlayerGui"))
+
+local fab = new("TextButton", { Name = "Open", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.4, 0), Size = UDim2.fromOffset(46, 46), BackgroundColor3 = C.bg, BackgroundTransparency = 0.1, Text = "V", TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 22 }, gui)
+round(fab, 23)
+stroke(fab, C.accent, 1.5)
+
+local window = new("Frame", { Name = "Window", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(560, 350), BackgroundColor3 = C.bg, BackgroundTransparency = 0.04, Visible = false, Active = true }, gui)
+round(window, 12)
+stroke(window, C.line, 1)
+
+local winScale = new("UIScale", {}, window)
+local function updateScale()
+	local vp = camera.ViewportSize
+	winScale.Scale = math.clamp(math.min(vp.X / 600, vp.Y / 380), 0.45, 1)
+end
+updateScale()
+camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
+
+local dragFn, lockedPage = nil, nil
+UserInputService.InputChanged:Connect(function(input)
+	if dragFn and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then dragFn(input.Position) end
+end)
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragFn = nil
+		if lockedPage then lockedPage.ScrollingEnabled = true; lockedPage = nil end
+	end
+end)
+
+local titleBar = new("Frame", { Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1 }, window)
+new("TextLabel", { Position = UDim2.fromOffset(14, 0), Size = UDim2.new(1, -60, 1, 0), BackgroundTransparency = 1, Text = "VISUALS", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left }, titleBar)
+
+local closeBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(26, 26), BackgroundColor3 = C.item, Text = "×", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 18 }, titleBar)
+round(closeBtn, 8)
+
+titleBar.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		local startMouse = input.Position
+		local startPos = window.Position
+		dragFn = function(pos)
+			local d = pos - startMouse
+			window.Position = UDim2.fromScale(startPos.X.Scale + d.X / gui.AbsoluteSize.X, startPos.Y.Scale + d.Y / gui.AbsoluteSize.Y)
+		end
+	end
+end)
+
+local side = new("ScrollingFrame", { Position = UDim2.fromOffset(0, 36), Size = UDim2.new(0, 128, 1, -36), BackgroundColor3 = C.side, BorderSizePixel = 0, ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, window)
+round(side, 12)
+new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, side)
+new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, side)
+
+local content = new("Frame", { Position = UDim2.fromOffset(136, 40), Size = UDim2.new(1, -144, 1, -48), BackgroundTransparency = 1 }, window)
+
+local pages, tabButtons = {}, {}
+local function selectTab(name)
+	for n, pg in pairs(pages) do pg.Visible = (n == name) end
+	for n, b in pairs(tabButtons) do
+		b.BackgroundTransparency = (n == name) and 0 or 1
+		b.TextColor3 = (n == name) and C.text or C.dim
+	end
+end
+
+local function addTab(name, title)
+	local b = new("TextButton", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.item, BackgroundTransparency = 1, Text = "  " .. title, TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.dim, Font = Enum.Font.GothamMedium, TextSize = 14, AutoButtonColor = false, LayoutOrder = nextOrder() }, side)
+	round(b, 8)
+	local pg = new("ScrollingFrame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false }, content)
+	new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, pg)
+	new("UIPadding", { PaddingRight = UDim.new(0, 6) }, pg)
+	pages[name] = pg
+	tabButtons[name] = b
+	b.Activated:Connect(function() selectTab(name) end)
+	return pg
+end
+
+local function bind(cfg, key, apply)
+	return function() return cfg[key] end, function(v) cfg[key] = v; apply() end
+end
+
+local function row(page, height)
+	local r = new("Frame", { Size = UDim2.new(1, 0, 0, height), BackgroundColor3 = C.item, LayoutOrder = nextOrder() }, page)
+	round(r, 8)
+	return r
+end
+
+local function rowLabel(r, text)
+	return new("TextLabel", { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(0.6, 0, 0, 34), BackgroundTransparency = 1, Text = text, TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left }, r)
+end
+
+local function header(page, text)
+	new("TextLabel", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = text, TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = nextOrder() }, page)
+end
+
+local function toggle(page, text, get, set)
+	local r = row(page, 34)
+	rowLabel(r, text)
+	local pill = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(38, 20), BackgroundColor3 = C.bg }, r)
+	round(pill, 10)
+	local knob = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = C.text }, pill)
+	round(knob, 7)
+	local function paint(animate)
+		local on = get()
+		local info = TweenInfo.new(animate and 0.12 or 0)
+		TweenService:Create(pill, info, { BackgroundColor3 = on and C.accent or C.bg }):Play()
+		TweenService:Create(knob, info, { Position = UDim2.new(0, on and 21 or 3, 0.5, 0) }):Play()
+	end
+	paint(false)
+	local hit = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "" }, r)
+	hit.Activated:Connect(function() set(not get()); paint(true) end)
+end
+
+local function slider(page, text, min, max, step, fmt, get, set)
+	local r = row(page, 48)
+	rowLabel(r, text)
+	local isInt = string.find(fmt, "%%d") ~= nil
+	local val = new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 0), Size = UDim2.fromOffset(70, 30), BackgroundTransparency = 1, TextColor3 = C.dim, Font = Enum.Font.GothamMedium, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right }, r)
+	local bar = new("Frame", { Position = UDim2.new(0, 12, 0, 34), Size = UDim2.new(1, -24, 0, 6), BackgroundColor3 = C.bg }, r)
+	round(bar, 3)
+	local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.accent }, bar)
+	round(fill, 3)
+	local function paint()
+		local v = get()
+		fill.Size = UDim2.fromScale(math.clamp((v - min) / (max - min), 0, 1), 1)
+		val.Text = string.format(fmt, isInt and math.floor(v + 0.5) or v)
+	end
+	paint()
+	local function fromX(x)
+		local a = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+		local v = math.floor((min + a * (max - min)) / step + 0.5) * step
+		set(math.clamp(v, min, max)); paint()
+	end
+	local hit = new("TextButton", { Position = UDim2.fromOffset(0, 24), Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, Text = "" }, r)
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			lockedPage = page; page.ScrollingEnabled = false
+			dragFn = function(pos) fromX(pos.X) end
+			fromX(input.Position.X)
+		end
+	end)
+end
+
+local function chooser(page, text, options, get, set)
+	local r = row(page, 34)
+	rowLabel(r, text)
+	local b = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(110, 24), BackgroundColor3 = C.bg, TextColor3 = C.accent, Font = Enum.Font.GothamMedium, TextSize = 13 }, r)
+	round(b, 6)
+	local function paint() b.Text = get() end
+	paint()
+	b.Activated:Connect(function()
+		local i = table.find(options, get()) or 1
+		set(options[i % #options + 1]); paint()
+	end)
+end
+
+local function colorRow(page, cfg, onChange)
+	local r = row(page, 58)
+	rowLabel(r, "Цвет")
+	local holder = new("Frame", { Position = UDim2.fromOffset(12, 30), Size = UDim2.new(1, -24, 0, 22), BackgroundTransparency = 1 }, r)
+	new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6) }, holder)
+	local rainbowIndex = #PALETTE + 1
+	local strokes = {}
+	local function paint()
+		for i, s in ipairs(strokes) do
+			local selected
+			if i == rainbowIndex then selected = cfg.rainbow else selected = (not cfg.rainbow) and cfg.color == PALETTE[i] end
+			s.Transparency = selected and 0 or 1
+		end
+	end
+	for i = 1, rainbowIndex do
+		local sw = new("TextButton", { Size = UDim2.fromOffset(22, 22), Text = "", BackgroundColor3 = PALETTE[i] or Color3.new(1, 1, 1), AutoButtonColor = false }, holder)
+		round(sw, 11)
+		if i == rainbowIndex then
+			new("UIGradient", { Color = ColorSequence.new({ ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 80, 80)), ColorSequenceKeypoint.new(0.33, Color3.fromRGB(100, 255, 150)), ColorSequenceKeypoint.new(0.66, Color3.fromRGB(80, 160, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 80, 200)) }) }, sw)
+		end
+		strokes[i] = stroke(sw, Color3.new(1, 1, 1), 2, 1)
+		sw.Activated:Connect(function()
+			if i == rainbowIndex then
+				cfg.rainbow = true
+			else
+				cfg.rainbow = false
+				cfg.color = PALETTE[i]
+			end
+			paint()
+			onChange()
+		end)
+	end
+	paint()
+end
+
+---------------------------------------------------------------------
+-- ВКЛАДКИ
+---------------------------------------------------------------------
+local pg = addTab("trail", "Trail")
+header(pg, "TRAIL")
+toggle(pg, "Включено", bind(S.trail, "on", applyTrail))
+chooser(pg, "Стиль", TRAIL_ORDER, bind(S.trail, "style", applyTrail))
+colorRow(pg, S.trail, applyTrail)
+slider(pg, "Длина (сек)", 0.2, 4, 0.1, "%.1f", bind(S.trail, "life", applyTrail))
+slider(pg, "Ширина", 0.5, 6, 0.1, "%.1f", bind(S.trail, "width", applyTrail))
+slider(pg, "Яркость", 0, 1, 0.05, "%.2f", bind(S.trail, "bright", applyTrail))
+
+pg = addTab("aura", "Aura")
+header(pg, "AURA")
+toggle(pg, "Включено", bind(S.aura, "on", applyAura))
+chooser(pg, "Стиль", AURA_ORDER, bind(S.aura, "style", applyAura))
+colorRow(pg, S.aura, applyAura)
+slider(pg, "Плотность", 5, 150, 5, "%d", bind(S.aura, "rate", applyAura))
+slider(pg, "Скорость", 0, 15, 0.5, "%.1f", bind(S.aura, "speed", applyAura))
+slider(pg, "Разброс", 0, 180, 5, "%d", bind(S.aura, "spread", applyAura))
+slider(pg, "Размер", 0.2, 3, 0.1, "%.1f", bind(S.aura, "size", applyAura))
+slider(pg, "Подъём (дрейф)", -5, 10, 0.5, "%.1f", bind(S.aura, "drift", applyAura))
+
+pg = addTab("orbit", "Orbit")
+header(pg, "ORBIT")
+toggle(pg, "Включено", bind(S.orbit, "on", rebuildOrbs))
+colorRow(pg, S.orbit, rebuildOrbs)
+slider(pg, "Количество", 1, 12, 1, "%d", bind(S.orbit, "count", rebuildOrbs))
+slider(pg, "Радиус", 1.5, 12, 0.5, "%.1f", bind(S.orbit, "radius", noop))
+slider(pg, "Скорость", 0.2, 8, 0.1, "%.1f", bind(S.orbit, "speed", noop))
+slider(pg, "Высота", -2, 4, 0.1, "%.1f", bind(S.orbit, "height", noop))
+slider(pg, "Размер", 0.2, 2, 0.1, "%.1f", bind(S.orbit, "size", rebuildOrbs))
+toggle(pg, "Шлейф", bind(S.orbit, "tail", rebuildOrbs))
+
+pg = addTab("glow", "Glow")
+header(pg, "GLOW")
+toggle(pg, "Включено", bind(S.glow, "on", applyGlow))
+colorRow(pg, S.glow, applyGlow)
+slider(pg, "Заливка (прозр.)", 0, 1, 0.05, "%.2f", bind(S.glow, "fill", applyGlow))
+toggle(pg, "Свет вокруг", bind(S.glow, "light", applyGlow))
+slider(pg, "Радиус света", 4, 40, 1, "%d", bind(S.glow, "range", applyGlow))
+slider(pg, "Яркость света", 0, 6, 0.25, "%.2f", bind(S.glow, "power", applyGlow))
+
+pg = addTab("burst", "Burst")
+header(pg, "JUMP BURST")
+toggle(pg, "Включено", bind(S.burst, "on", noop))
+colorRow(pg, S.burst, noop)
+slider(pg, "Размер кольца", 6, 40, 1, "%d", bind(S.burst, "size", noop))
+
+pg = addTab("world", "World")
+header(pg, "WORLD")
+toggle(pg, "Включено", bind(S.world, "on", applyWorld))
+slider(pg, "Время суток", 0, 24, 0.1, "%.1f", bind(S.world, "time", applyWorld))
+slider(pg, "Bloom", 0, 3, 0.05, "%.2f", bind(S.world, "bloom", applyWorld))
+slider(pg, "Насыщенность", -1, 1, 0.05, "%.2f", bind(S.world, "sat", applyWorld))
+slider(pg, "Контраст", -1, 1, 0.05, "%.2f", bind(S.world, "contrast", applyWorld))
+slider(pg, "FOV", 40, 120, 1, "%d", bind(S.world, "fov", applyWorld))
+
+---------------------------------------------------------------------
+-- FOOTSTEPS
+---------------------------------------------------------------------
+S.steps = { on = false, style = "Круги", color = BLUE, rainbow = false, size = 2, life = 1.2, trans = 0.3 }
+local STEP_STYLES = { "Круги", "Искры", "Пламя" }
+local STRIDE = 4
+local stepDist, stepSide = 0, 1
+
+local function spawnStep()
+	local c = S.steps
+	local feet = (hum.RigType == Enum.HumanoidRigType.R15) and (hum.HipHeight + hrp.Size.Y / 2) or 3
+	local pos = hrp.Position - Vector3.new(0, feet - 0.05, 0) + hrp.CFrame.RightVector * (0.55 * stepSide)
+	local col = colorOf(c)
+
+	if c.style == "Круги" then
+		local ring = new("Part", {
+			Shape = Enum.PartType.Cylinder,
+			Material = Enum.Material.Neon,
+			Color = col,
+			Anchored = true,
+			CanCollide = false,
+			CanQuery = false,
+			CanTouch = false,
+			CastShadow = false,
+			Transparency = c.trans,
+			Size = Vector3.new(0.1, c.size, c.size),
+			CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90)),
+		}, folder)
+		TweenService:Create(ring, TweenInfo.new(c.life, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			Size = Vector3.new(0.1, c.size * 1.6, c.size * 1.6),
+			Transparency = 1,
+		}):Play()
+		Debris:AddItem(ring, c.life + 0.1)
+		return
+	end
+
+	local spark = (c.style == "Искры")
+	local anchor = new("Part", {
+		Anchored = true,
+		CanCollide = false,
+		CanQuery = false,
+		CanTouch = false,
+		Transparency = 1,
+		Size = Vector3.new(0.5, 0.1, 0.5),
+		CFrame = CFrame.new(pos),
+	}, folder)
+	local em = new("ParticleEmitter", {
+		Enabled = false,
+		Texture = spark and "rbxasset://textures/particles/sparkles_main.dds"
+			or "rbxasset://textures/particles/fire_main.dds",
+		Color = ColorSequence.new(col),
+		LightEmission = 1,
+		Lifetime = NumberRange.new(c.life * 0.5, c.life),
+		Size = ns({ 0, c.size * (spark and 0.35 or 0.6) }, { 1, 0 }),
+		Transparency = ns({ 0, c.trans }, { 1, 1 }),
+		Speed = spark and NumberRange.new(4, 9) or NumberRange.new(1, 3),
+		SpreadAngle = Vector2.new(spark and 50 or 25, spark and 50 or 25),
+		Acceleration = Vector3.new(0, spark and -12 or 5, 0),
+		Rotation = NumberRange.new(0, 360),
+	}, anchor)
+	em:Emit(spark and 14 or 8)
+	Debris:AddItem(anchor, c.life + 0.2)
+end
+
+RunService.Heartbeat:Connect(function(dt)
+	local c = S.steps
+	if not c.on or not hrp or not hum or hum.Health <= 0 then
+		stepDist = 0
+		return
+	end
+	if hum.FloorMaterial == Enum.Material.Air or hum.MoveDirection.Magnitude < 0.1 then
+		return
+	end
+	local v = hrp.AssemblyLinearVelocity
+	stepDist += Vector3.new(v.X, 0, v.Z).Magnitude * dt
+	if stepDist >= STRIDE then
+		stepDist -= STRIDE
+		stepSide = -stepSide
+		spawnStep()
+	end
+end)
+
+pg = addTab("steps", "Footsteps")
+header(pg, "FOOTSTEPS")
+toggle(pg, "Включено", bind(S.steps, "on", noop))
+chooser(pg, "Стиль", STEP_STYLES, bind(S.steps, "style", noop))
+colorRow(pg, S.steps, noop)
+slider(pg, "Размер следа", 0.5, 6, 0.1, "%.1f", bind(S.steps, "size", noop))
+slider(pg, "Время жизни", 0.3, 4, 0.1, "%.1f с", bind(S.steps, "life", noop))
+slider(pg, "Прозрачность", 0, 0.95, 0.05, "%.2f", bind(S.steps, "trans", noop))
+
+---------------------------------------------------------------------
+-- MUSIC
+---------------------------------------------------------------------
+local SoundService = game:GetService("SoundService")
+local M = { vol = 1, speed = 1 }
+local music = new("Sound", { Name = "VisualsMusic", Volume = M.vol, PlaybackSpeed = M.speed }, SoundService)
+local playToken = 0
+local idBox, statusLabel
+
+local function setStatus(text)
+	if statusLabel then statusLabel.Text = text end
+end
+
+local function playMusic()
+	local digits = string.match(idBox.Text, "%d+")
+	if not digits then setStatus("Введи ID аудио (только цифры)"); return end
+	playToken += 1
+	local token = playToken
+	music:Stop()
+	music.SoundId = "rbxassetid://" .. digits
+	music.Volume = M.vol
+	music.PlaybackSpeed = M.speed
+	music:Play()
+	setStatus("Загрузка...")
+	task.delay(4, function()
+		if token ~= playToken then return end
+		if music.IsLoaded then
+			setStatus(music.IsPlaying and "Играет" or "Готово")
+		else
+			setStatus("Не загрузилось: неверный ID или нет доступа")
+		end
+	end)
+end
+
+local function stopMusic()
+	playToken += 1
+	music:Stop()
+	setStatus("Остановлено")
+end
+
+pg = addTab("music", "Music")
+header(pg, "MUSIC / SFX")
+
+local idRow = row(pg, 40)
+idBox = new("TextBox", {
+	Position = UDim2.fromOffset(8, 6),
+	Size = UDim2.new(1, -16, 1, -12),
+	BackgroundColor3 = C.bg,
+	PlaceholderText = "ID аудио (цифры)",
+	PlaceholderColor3 = C.dim,
+	Text = "",
+	ClearTextOnFocus = false,
+	TextColor3 = C.text,
+	Font = Enum.Font.Gotham,
+	TextSize = 13,
+}, idRow)
+round(idBox, 6)
+
+local btnRow = row(pg, 40)
+local function actionBtn(text, color, x, offset, callback)
+	local b = new("TextButton", {
+		Position = UDim2.new(x, offset, 0, 6),
+		Size = UDim2.new(0.5, -12, 1, -12),
+		BackgroundColor3 = color,
+		Text = text,
+		TextColor3 = Color3.new(1, 1, 1),
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+	}, btnRow)
+	round(b, 6)
+	b.Activated:Connect(callback)
+end
+actionBtn("Играть", Color3.fromRGB(50, 140, 80), 0, 8, playMusic)
+actionBtn("Стоп", Color3.fromRGB(170, 50, 50), 0.5, 4, stopMusic)
+
+local statusRow = row(pg, 28)
+statusLabel = new("TextLabel", {
+	Position = UDim2.fromOffset(12, 0),
+	Size = UDim2.new(1, -24, 1, 0),
+	BackgroundTransparency = 1,
+	Text = "Введи ID и нажми «Играть»",
+	TextColor3 = C.dim,
+	Font = Enum.Font.GothamMedium,
+	TextSize = 12,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+}, statusRow)
+
+slider(pg, "Громкость", 0, 5, 0.1, "%.1f", bind(M, "vol", function() music.Volume = M.vol end))
+slider(pg, "Скорость", 0.25, 3, 0.05, "%.2f", bind(M, "speed", function() music.PlaybackSpeed = M.speed end))
+
+---------------------------------------------------------------------
+-- SKY
+---------------------------------------------------------------------
+S.sky = { preset = "Обычное", shift = 0, exposure = 0 }
+
+local SKY_ORDER = { "Обычное", "Космос", "Закат", "Ночь", "Кровавая луна", "Гроза", "Киберпанк", "Хоррор" }
+
+local SKY_DEFAULT = {
+	time = 14, stars = 3000, bright = 2,
+	ambient = Color3.fromRGB(70, 70, 70), outdoor = Color3.fromRGB(70, 70, 70),
+	top = Color3.new(0, 0, 0), bottom = Color3.new(0, 0, 0),
+	fog = Color3.fromRGB(191, 191, 191), fogStart = 0, fogEnd = 100000,
+	tint = Color3.new(1, 1, 1), sat = 0, contrast = 0, bloom = 0, rays = 0,
+}
+
+local SKY_PRESETS = {
+	["Космос"] = { time = 0, stars = 5000, moon = 28, bright = 0.4, ambient = Color3.fromRGB(45, 35, 80), outdoor = Color3.fromRGB(60, 45, 105), top = Color3.fromRGB(80, 60, 160), tint = Color3.fromRGB(215, 205, 255), sat = 0.2, contrast = 0.1, bloom = 1.2 },
+	["Закат"] = { time = 17.9, stars = 0, sun = 42, atm = { Density = 0.38, Offset = 0.25, Color = Color3.fromRGB(255, 175, 115), Decay = Color3.fromRGB(255, 100, 55), Glare = 1.2, Haze = 2 }, bright = 2, ambient = Color3.fromRGB(120, 75, 60), outdoor = Color3.fromRGB(165, 105, 80), top = Color3.fromRGB(255, 150, 80), tint = Color3.fromRGB(255, 228, 205), sat = 0.2, contrast = 0.1, bloom = 0.5, rays = 0.25 },
+	["Ночь"] = { time = 0, stars = 3500, moon = 16, atm = { Density = 0.25, Offset = 0, Color = Color3.fromRGB(70, 90, 150), Decay = Color3.fromRGB(25, 35, 80), Glare = 0, Haze = 1 }, bright = 0.6, ambient = Color3.fromRGB(35, 45, 85), outdoor = Color3.fromRGB(45, 60, 115), tint = Color3.fromRGB(195, 210, 255), sat = -0.1, contrast = 0.05, bloom = 0.4 },
+	["Кровавая луна"] = { time = 0, stars = 1200, moon = 26, atm = { Density = 0.4, Offset = 0.1, Color = Color3.fromRGB(170, 25, 25), Decay = Color3.fromRGB(95, 0, 0), Glare = 0, Haze = 2.5 }, bright = 0.7, ambient = Color3.fromRGB(85, 12, 12), outdoor = Color3.fromRGB(120, 18, 18), top = Color3.fromRGB(255, 40, 40), fog = Color3.fromRGB(70, 0, 0), fogStart = 60, fogEnd = 700, tint = Color3.fromRGB(255, 175, 175), sat = 0.1, contrast = 0.15, bloom = 0.6 },
+	["Гроза"] = { time = 14, stars = 0, bodies = false, atm = { Density = 0.55, Offset = 0, Color = Color3.fromRGB(125, 130, 140), Decay = Color3.fromRGB(70, 75, 85), Glare = 0, Haze = 4 }, bright = 0.7, ambient = Color3.fromRGB(70, 75, 85), outdoor = Color3.fromRGB(95, 100, 110), fog = Color3.fromRGB(95, 100, 110), fogStart = 20, fogEnd = 450, tint = Color3.fromRGB(200, 210, 225), sat = -0.3, contrast = 0.1 },
+	["Киберпанк"] = { time = 21, stars = 800, atm = { Density = 0.4, Offset = 0, Color = Color3.fromRGB(255, 60, 200), Decay = Color3.fromRGB(90, 40, 255), Glare = 0, Haze = 2 }, bright = 1, ambient = Color3.fromRGB(80, 30, 120), outdoor = Color3.fromRGB(105, 40, 155), top = Color3.fromRGB(0, 220, 255), bottom = Color3.fromRGB(255, 0, 200), fog = Color3.fromRGB(120, 20, 160), fogStart = 40, fogEnd = 800, tint = Color3.fromRGB(255, 195, 255), sat = 0.4, contrast = 0.2, bloom = 1.5 },
+	["Хоррор"] = { time = 22, stars = 600, moon = 12, atm = { Density = 0.6, Offset = 0, Color = Color3.fromRGB(40, 55, 50), Decay = Color3.fromRGB(15, 25, 20), Glare = 0, Haze = 3 }, bright = 0.35, ambient = Color3.fromRGB(22, 32, 28), outdoor = Color3.fromRGB(32, 45, 40), fog = Color3.fromRGB(25, 35, 30), fogStart = 10, fogEnd = 200, tint = Color3.fromRGB(200, 225, 210), sat = -0.4, contrast = 0.2 },
+}
+
+local FACE_PROPS = { Bk = "SkyboxBk", Dn = "SkyboxDn", Ft = "SkyboxFt", Lf = "SkyboxLf", Rt = "SkyboxRt", Up = "SkyboxUp" }
+local LIGHT_PROPS = { "Brightness", "Ambient", "OutdoorAmbient", "ColorShift_Top", "ColorShift_Bottom", "ClockTime", "FogColor", "FogStart", "FogEnd", "ExposureCompensation" }
+
+local skyObj = new("Sky", { Name = "VisSky" }, nil)
+local atm = new("Atmosphere", { Name = "VisAtmosphere" }, nil)
+local skyCC = new("ColorCorrectionEffect", { Name = "VisSkyColor", Enabled = false }, Lighting)
+local skyBloom = new("BloomEffect", { Name = "VisSkyBloom", Enabled = false, Size = 30, Threshold = 0.9 }, Lighting)
+local skyRays = new("SunRaysEffect", { Name = "VisSkyRays", Enabled = false, Spread = 0.7 }, Lighting)
+
+local savedLighting = nil
+local stashed = {}
+
+local function pv(p, k) if p[k] ~= nil then return p[k] end return SKY_DEFAULT[k] end
+
+local function snapshotSky()
+	if savedLighting then return end
+	savedLighting = {}
+	for _, k in ipairs(LIGHT_PROPS) do savedLighting[k] = Lighting[k] end
+	for _, ch in ipairs(Lighting:GetChildren()) do
+		if (ch:IsA("Sky") or ch:IsA("Atmosphere")) and ch ~= skyObj and ch ~= atm then
+			table.insert(stashed, ch); ch.Parent = nil
+		end
+	end
+end
+
+local function restoreSky()
+	skyObj.Parent = nil; atm.Parent = nil
+	skyCC.Enabled = false; skyCC.Brightness = 0
+	skyBloom.Enabled = false; skyRays.Enabled = false
+	if savedLighting then
+		for k, v in pairs(savedLighting) do Lighting[k] = v end
+		savedLighting = nil
+	end
+	for _, ch in ipairs(stashed) do ch.Parent = Lighting end
+	table.clear(stashed)
+end
+
+local function applySky()
+	local p = SKY_PRESETS[S.sky.preset]
+	if not p then restoreSky(); return end
+	snapshotSky()
+	for key, prop in pairs(FACE_PROPS) do skyObj[prop] = (p.faces and p.faces[key]) or "" end
+	skyObj.StarCount = pv(p, "stars"); skyObj.CelestialBodiesShown = (p.bodies ~= false)
+	skyObj.SunAngularSize = p.sun or 21; skyObj.MoonAngularSize = p.moon or 11
+	skyObj.Parent = Lighting
+	if p.atm then for k, v in pairs(p.atm) do atm[k] = v end; atm.Parent = Lighting else atm.Parent = nil end
+	Lighting.Brightness = pv(p, "bright"); Lighting.Ambient = pv(p, "ambient")
+	Lighting.OutdoorAmbient = pv(p, "outdoor"); Lighting.ColorShift_Top = pv(p, "top")
+	Lighting.ColorShift_Bottom = pv(p, "bottom"); Lighting.FogColor = pv(p, "fog")
+	Lighting.FogStart = pv(p, "fogStart"); Lighting.FogEnd = pv(p, "fogEnd")
+	Lighting.ClockTime = (pv(p, "time") + S.sky.shift) % 24
+	Lighting.ExposureCompensation = S.sky.exposure
+	skyCC.Enabled = true; skyCC.Brightness = 0
+	skyCC.TintColor = pv(p, "tint"); skyCC.Saturation = pv(p, "sat"); skyCC.Contrast = pv(p, "contrast")
+	skyBloom.Intensity = pv(p, "bloom"); skyBloom.Enabled = pv(p, "bloom") > 0
+	skyRays.Intensity = pv(p, "rays"); skyRays.Enabled = pv(p, "rays") > 0
+end
+
+local nextFlash = 0
+local function flash()
+	skyCC.Brightness = 0.55
+	TweenService:Create(skyCC, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Brightness = 0 }):Play()
+end
+
+RunService.Heartbeat:Connect(function()
+	if S.sky.preset ~= "Гроза" then return end
+	local now = os.clock()
+	if now >= nextFlash then
+		nextFlash = now + math.random(40, 120) / 10
+		flash()
+		task.delay(0.18, flash)
+	end
+end)
+
+pg = addTab("sky", "Sky")
+header(pg, "SKY & LIGHTING")
+
+local grid = new("Frame", { Size = UDim2.new(1, 0, 0, 4 * 34 + 3 * 6), BackgroundTransparency = 1, LayoutOrder = nextOrder() }, pg)
+new("UIGridLayout", { CellSize = UDim2.new(0.5, -4, 0, 34), CellPadding = UDim2.fromOffset(8, 6), SortOrder = Enum.SortOrder.LayoutOrder }, grid)
+
+local skyButtons = {}
+local function paintSkyButtons()
+	for name, b in pairs(skyButtons) do
+		local selected = (S.sky.preset == name)
+		b.BackgroundColor3 = selected and C.accent or C.item
+		b.TextColor3 = selected and Color3.new(1, 1, 1) or C.text
+	end
+end
+
+for i, name in ipairs(SKY_ORDER) do
+	local b = new("TextButton", { Text = name, BackgroundColor3 = C.item, TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 13, AutoButtonColor = false, LayoutOrder = i }, grid)
+	round(b, 8)
+	skyButtons[name] = b
+	b.Activated:Connect(function()
+		S.sky.preset = name
+		paintSkyButtons()
+		applySky()
+	end)
+end
+paintSkyButtons()
+
+slider(pg, "Сдвиг времени", -6, 6, 0.5, "%.1f ч", bind(S.sky, "shift", applySky))
+slider(pg, "Яркость", -2, 2, 0.1, "%.1f", bind(S.sky, "exposure", applySky))
+
+---------------------------------------------------------------------
+-- ЗАПУСК
+---------------------------------------------------------------------
+local function setOpen(v) window.Visible = v end
+fab.Activated:Connect(function() setOpen(not window.Visible) end)
+closeBtn.Activated:Connect(function() setOpen(false) end)
+UserInputService.InputBegan:Connect(function(input, processed)
+	if not processed and input.KeyCode == TOGGLE_KEY then setOpen(not window.Visible) end
+end)
+
+RunService.Heartbeat:Connect(function(dt)
+	hue = (hue + dt * 0.25) % 1
+	applyColors()
+	local cam = workspace.CurrentCamera
+	if S.world.on and cam then cam.FieldOfView = S.world.fov end
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+	local n = #orbs
+	if n == 0 or not hrp then return end
+	local c = S.orbit
+	orbitPhase += dt * c.speed
+	local center = hrp.Position
+	for i, p in ipairs(orbs) do
+		local a = orbitPhase + (i - 1) / n * math.pi * 2
+		local y = c.height + math.sin(orbitPhase * 1.3 + i) * 0.4
+		p.CFrame = CFrame.new(center + Vector3.new(math.cos(a) * c.radius, y, math.sin(a) * c.radius))
+	end
+end)
+
+player.CharacterAdded:Connect(onCharacter)
+if player.Character then task.spawn(onCharacter, player.Character) end
+selectTab("trail")
